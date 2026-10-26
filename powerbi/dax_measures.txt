@@ -1,0 +1,89 @@
+OLIST E-COMMERCE ANALYTICS: POWER BI DAX REFERENCE
+====================================================
+12 measures and 1 calculated column used by the 4-page dashboard.
+Create measures in the order listed: later ones reference earlier ones.
+
+Model prerequisites
+- dim_date is marked as the date table (date_key column). MoM and YoY need this.
+- fact_order_items -> fact_orders relationship uses cross-filter direction "Both",
+  so item-level visuals (category, seller) can show order-level values
+  (review score, delivery performance).
+
+
+---- fact_order_items ----
+
+Total Revenue = SUM(fact_order_items[price])
+-- Merchandise revenue only; freight is tracked separately.
+
+Freight % = DIVIDE(SUM(fact_order_items[freight_value]), SUM(fact_order_items[price]))
+-- Freight cost as a share of merchandise value.
+
+
+---- fact_orders ----
+
+Total Orders = DISTINCTCOUNT(fact_orders[order_id])
+
+Total Customers = DISTINCTCOUNT(fact_orders[customer_unique_id])
+-- customer_unique_id is the real customer. customer_id is generated per order.
+
+Average Order Value = DIVIDE([Total Revenue], [Total Orders])
+
+Average Review Score = AVERAGE(fact_orders[review_score])
+-- Orders without a review are ignored automatically.
+
+Average Delivery Days = AVERAGE(fact_orders[delivery_time_days])
+-- Blank for undelivered orders, so they are ignored automatically.
+
+On-Time Delivery % =
+VAR Arrived =
+    FILTER(fact_orders, NOT ISBLANK(fact_orders[delivery_delay_days]))
+VAR OnTime =
+    FILTER(Arrived, fact_orders[delivery_delay_days] <= 0)
+RETURN
+    DIVIDE(COUNTROWS(OnTime), COUNTROWS(Arrived))
+-- Counts only orders that have a delivery date. An earlier version compared
+-- delivery_delay_days <= 0 directly; DAX treats a blank as 0 in that
+-- comparison, so undelivered orders counted as on time and the KPI read 96.30%
+-- instead of 93.23%. Found by recomputing the KPI in Python.
+
+Late Delivery % = 1 - [On-Time Delivery %]
+
+Repeat Customer % =
+VAR CustomerOrderCounts =
+    SUMMARIZE(fact_orders, fact_orders[customer_unique_id], "OrderCount", COUNTROWS(fact_orders))
+VAR RepeatCustomers =
+    COUNTROWS(FILTER(CustomerOrderCounts, [OrderCount] > 1))
+VAR TotalCustomers =
+    COUNTROWS(CustomerOrderCounts)
+RETURN
+    DIVIDE(RepeatCustomers, TotalCustomers)
+-- Share of customers with more than one order.
+
+MoM Growth % =
+VAR CurrentRevenue = [Total Revenue]
+VAR PreviousMonthRevenue = CALCULATE([Total Revenue], DATEADD(dim_date[date_key], -1, MONTH))
+RETURN
+    DIVIDE(CurrentRevenue - PreviousMonthRevenue, PreviousMonthRevenue)
+
+YoY Growth % =
+VAR CurrentRevenue = [Total Revenue]
+VAR PreviousYearRevenue = CALCULATE([Total Revenue], SAMEPERIODLASTYEAR(dim_date[date_key]))
+RETURN
+    DIVIDE(CurrentRevenue - PreviousYearRevenue, PreviousYearRevenue)
+-- Blank for the first months of the data: the dataset starts in late 2016, so
+-- there is no earlier year to compare against.
+
+
+---- Calculated column on fact_orders ----
+
+Delivery Bucket =
+SWITCH(
+    TRUE(),
+    ISBLANK(fact_orders[delivery_delay_days]), "Not Delivered",
+    fact_orders[delivery_delay_days] <= -7, "1. Early (7+ days)",
+    fact_orders[delivery_delay_days] <= 0,  "2. On Time",
+    fact_orders[delivery_delay_days] <= 7,  "3. Late (1-7 days)",
+    TRUE(),                                  "4. Very Late (7+ days)"
+)
+-- Same four buckets as SQL Query 17 and the Python statistical tests.
+-- Used by the "Average Review Score by Delivery Bucket" chart.
